@@ -21,10 +21,9 @@ def get_best_sheet(xl_file):
 
 @st.cache_data
 def load_year_data(year, freq="60"):
-    """Carica i file (Excel o CSV) dal repository filtrando per anno e frequenza."""
+    """Carica i file dal repository filtrando per anno e frequenza."""
     try:
         all_entries = os.listdir(DATA_PATH)
-        # Supporta sia .xlsx/.xls che .csv
         target_files = [f for f in all_entries if str(year) in f and f.lower().endswith(('.xlsx', '.xls', '.csv'))]
         
         if year >= 2025:
@@ -51,7 +50,7 @@ def load_year_data(year, freq="60"):
     except:
         return None
 
-# --- INTERFACCIA ---
+# --- UI INTERFACCIA ---
 st.title("⚡ Energy Cost Calculator")
 
 year = st.sidebar.selectbox("Anno", list(range(2004, 2027)), index=21)
@@ -78,7 +77,6 @@ if p_data is not None:
     if st.button("Esegui Calcolo"):
         if curve_file:
             try:
-                # Caricamento curva: Giorno;00:00-00:15...
                 df_c = pd.read_csv(curve_file, sep=';', decimal=',', quotechar='"')
                 g_col = [c for c in df_c.columns if 'giorno' in c.lower()][0]
                 df_c[g_col] = pd.to_datetime(df_c[g_col], dayfirst=True)
@@ -89,7 +87,7 @@ if p_data is not None:
             # Normalizzazione date prezzi (es. 20250801)
             p_data[d_col] = p_data[d_col].astype(str).str.split('.').str[0].str.strip()
 
-            # Per il 2025+ carichiamo il secondo file (15 min)
+            # Per il 2025+ carichiamo il file a 15 min (TIDE)
             p15 = load_year_data(year, "15") if year >= 2025 else None
             if p15 is not None:
                 p15.columns = [str(c).replace('\n', ' ').strip() for c in p15.columns]
@@ -98,7 +96,6 @@ if p_data is not None:
 
             results = []
             for _, row_c in df_c.iterrows():
-                # Matching: "20250801"
                 dt_str = row_c[g_col].strftime('%Y%m%d')
                 day_p = p_data[p_data[d_col] == dt_str]
                 
@@ -106,14 +103,13 @@ if p_data is not None:
                 
                 day_p15 = p15[p15[d_col] == dt_str] if p15 is not None else None
 
-                for h in range(1, 25):
+                for h in range(1, 24 + 1):
                     try:
-                        # Prezzo orario applicato all'ora intera
                         p_row = day_p[day_p[h_col].astype(float).astype(int) == h]
                         if p_row.empty: continue
                         p_val = p_row[market].values[0]
                         
-                        # Carico: estrae i 4 quarti d'ora corrispondenti all'ora h
+                        # Estrazione 4 quarti d'ora
                         q_vals = row_c.iloc[(h-1)*4 + 1 : (h-1)*4 + 5].apply(
                             lambda x: float(str(x).replace(',', '.')) if isinstance(x, str) else float(x)
                         ).values
@@ -125,7 +121,6 @@ if p_data is not None:
                             "Costo_Su_Prezzo_Orario": sum(q_vals * p_val)
                         }
                         
-                        # Calcolo TIDE (15min) se disponibile (2025+)
                         if year >= 2025 and day_p15 is not None and per_col:
                             c15 = 0
                             for i, q in enumerate(q_vals):
@@ -143,9 +138,16 @@ if p_data is not None:
                 final['Mese'] = pd.to_datetime(final['Data']).dt.strftime('%Y-%m')
                 summary = final.groupby('Mese').sum(numeric_only=True).drop(columns=['Ora'])
                 
+                # --- BLOCCO TEST ANTEPRIMA ---
+                st.success("✅ Corrispondenza trovata!")
+                with st.expander("🔬 Anteprima Test (Primi 5 incroci)"):
+                    st.write("Verifica se i prezzi e le energie corrispondono ai tuoi file originali:")
+                    st.table(final.head(5))
+
                 st.write("### Riepilogo Mensile")
                 st.table(summary)
-                st.write("### Dettaglio Elaborato")
+                
+                st.write("### Dettaglio Completo")
                 st.dataframe(final)
                 
                 buf = BytesIO()
@@ -154,6 +156,6 @@ if p_data is not None:
                     summary.to_excel(w, sheet_name='Sintesi_Mensile')
                 st.download_button("📥 Scarica Report XLSX", buf.getvalue(), f"Analisi_{year}.xlsx")
             else:
-                st.error("Nessuna corrispondenza trovata tra le date della curva e i file prezzi.")
+                st.error("Nessun dato corrispondente trovato. Controlla che le date nel file prezzi e nella curva siano identiche.")
 else:
-    st.error(f"Nessun file prezzi trovato per il {year}. Controlla i file nel repository.")
+    st.error(f"Nessun file prezzi trovato per il {year} nel repository.")
