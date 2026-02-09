@@ -21,16 +21,17 @@ def get_best_sheet(xl_file):
 
 @st.cache_data
 def load_year_data(year, freq="60"):
-    """Carica i file (Excel o CSV) dal repository filtrando per anno e frequenza."""
+    """Carica i file dal repository filtrando per anno e frequenza."""
     try:
         all_entries = os.listdir(DATA_PATH)
-        # Supporta sia .xlsx/.xls che .csv (nel caso di esportazioni nominate .xlsx...csv)
+        # Filtriamo i file che contengono l'anno e l'estensione corretta
         target_files = [f for f in all_entries if str(year) in f and f.lower().endswith(('.xlsx', '.xls', '.csv'))]
         
         if year >= 2025:
             if freq == "15":
                 target_files = [f for f in target_files if "_15" in f]
             else:
+                # Prende _60 o i file senza specifica (orario standard)
                 target_files = [f for f in target_files if "_60" in f or ("_15" not in f and "_60" not in f)]
         
         if not target_files: return None
@@ -51,17 +52,20 @@ def load_year_data(year, freq="60"):
     except:
         return None
 
-# --- INTERFACCIA ---
+# --- UI INTERFACCIA ---
 st.title("⚡ Energy Cost Calculator")
 
 year = st.sidebar.selectbox("Anno", list(range(2004, 2027)), index=21)
+
+# Caricamento Prezzi
 p_data = load_year_data(year, "60")
 
 if p_data is not None:
-    # Pulizia nomi colonne Prezzi
+    # PULIZIA COLONNE: rimuove spazi e \n per evitare errori di puntamento
     p_data.columns = [str(c).replace('\n', ' ').strip() for c in p_data.columns]
     
     try:
+        # Cerca colonne data e ora ignorando spazi extra
         d_col = next(c for c in p_data.columns if 'data' in c.lower() or 'date' in c.lower())
         h_col = next(c for c in p_data.columns if 'ora' in c.lower() or 'hour' in c.lower())
     except StopIteration:
@@ -70,14 +74,14 @@ if p_data is not None:
     
     ignore = ['Data', 'Date', 'Ora', 'Hour', 'Periodo', 'Period', 'N°', 'N.']
     markets = [c for c in p_data.columns if not any(x in c.lower() for x in ignore)]
-    market = st.sidebar.selectbox("Seleziona Mercato", markets)
+    market = st.sidebar.selectbox("Seleziona Mercato (PUN, Zone...)", markets)
     
     curve_file = st.file_uploader("Carica Curva e-distribuzione (CSV)", type=['csv'])
 
     if st.button("Esegui Calcolo"):
         if curve_file:
             try:
-                # Caricamento curva con gestione automatica del formato
+                # Caricamento curva con gestione automatica del separatore
                 df_c = pd.read_csv(curve_file, sep=';', decimal=',', quotechar='"')
                 g_col = [c for c in df_c.columns if 'giorno' in c.lower()][0]
                 df_c[g_col] = pd.to_datetime(df_c[g_col], dayfirst=True)
@@ -85,7 +89,7 @@ if p_data is not None:
                 st.error(f"Errore caricamento curva: {e}")
                 st.stop()
             
-            # Normalizzazione date prezzi
+            # NORMALIZZAZIONE DATA PREZZI: trasforma 20250801.0 in "20250801"
             p_data[d_col] = p_data[d_col].astype(str).str.split('.').str[0].str.strip()
 
             p15 = load_year_data(year, "15") if year >= 2025 else None
@@ -96,19 +100,22 @@ if p_data is not None:
 
             results = []
             for _, row_c in df_c.iterrows():
+                # Formato matching: "20250801"
                 dt_str = row_c[g_col].strftime('%Y%m%d')
                 day_p = p_data[p_data[d_col] == dt_str]
+                
                 if day_p.empty: continue
                 
                 day_p15 = p15[p15[d_col] == dt_str] if p15 is not None else None
 
                 for h in range(1, 25):
                     try:
+                        # Prezzo orario
                         p_row = day_p[day_p[h_col].astype(float).astype(int) == h]
                         if p_row.empty: continue
                         p_val = p_row[market].values[0]
                         
-                        # Conversione valori energia (gestione virgola/stringa)
+                        # Carico: colonne curva (dal secondo elemento in poi)
                         q_vals = row_c.iloc[(h-1)*4 + 1 : (h-1)*4 + 5].apply(
                             lambda x: float(str(x).replace(',', '.')) if isinstance(x, str) else float(x)
                         ).values
@@ -120,6 +127,7 @@ if p_data is not None:
                             "Costo_Orario": sum(q_vals * p_val)
                         }
                         
+                        # Calcolo TIDE 15min per 2025+
                         if year >= 2025 and day_p15 is not None and per_col:
                             c15 = 0
                             for i, q in enumerate(q_vals):
@@ -128,6 +136,7 @@ if p_data is not None:
                                 if not p15_row.empty:
                                     c15 += (q * p15_row[market].values[0])
                             res["Costo_15min_TIDE"] = c15
+                        
                         results.append(res)
                     except: continue
 
@@ -138,7 +147,7 @@ if p_data is not None:
                 
                 st.write("### Riepilogo Mensile")
                 st.table(summary)
-                st.write("### Dettaglio")
+                st.write("### Dettaglio Giornaliero/Orario")
                 st.dataframe(final)
                 
                 buf = BytesIO()
@@ -147,6 +156,10 @@ if p_data is not None:
                     summary.to_excel(w, sheet_name='Sintesi')
                 st.download_button("📥 Scarica Report XLSX", buf.getvalue(), f"Risultato_{year}.xlsx")
             else:
-                st.error(f"Nessuna corrispondenza date trovata per l'anno {year}.")
+                st.error(f"Nessuna corrispondenza trovata. Le date della curva (es. {df_c[g_col].iloc[0].date()}) non sono presenti nei file prezzi caricati.")
+        else:
+            st.info("Trascina qui il file CSV della curva di carico.")
 else:
-    st.error(f"File prezzi per l'anno {year} non trovati nel repository.")
+    st.error(f"⚠️ File prezzi per l'anno {year} non trovati nel repository GitHub.")
+    with st.expander("Controlla file rilevati nel repository"):
+        st.write(os.listdir(DATA_PATH))
