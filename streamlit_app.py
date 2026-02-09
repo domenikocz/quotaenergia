@@ -11,10 +11,11 @@ DATA_PATH = os.getcwd()
 def format_euro(val):
     """Formatta i numeri in stile europeo: 17.303,4262"""
     if pd.isna(val): return ""
-    # Usa 'X' come segnaposto temporaneo per non sovrapporre le sostituzioni
+    # Formatta con 4 decimali, usa virgola per decimali e punto per migliaia
     return "{:,.4f}".format(val).replace(",", "X").replace(".", ",").replace("X", ".")
 
 def get_best_sheet(xl_file):
+    """Trova il foglio prezzi nei file Excel."""
     sheet_names = xl_file.sheet_names
     for s in sheet_names:
         if "prezzi-prices" in s.lower().replace(" ", ""):
@@ -26,14 +27,11 @@ def get_best_sheet(xl_file):
 
 @st.cache_data
 def load_year_data(year):
-    """Carica i file dal repository. Per 2025/26 ignora i file _15 per usare la regola oraria."""
+    """Carica i file dal repository usando la stessa regola per tutti gli anni."""
     try:
         all_entries = os.listdir(DATA_PATH)
-        target_files = [f for f in all_entries if str(year) in f and f.lower().endswith(('.xlsx', '.xls', '.csv'))]
-        
-        # Se 2025+, scarta i file a 15 minuti per applicare la regola oraria degli altri anni
-        if year >= 2025:
-            target_files = [f for f in target_files if "_15" not in f]
+        # Cerca file che contengono l'anno e hanno estensione Excel o CSV
+        target_files = [f for f in all_entries if f"Anno {year}" in f and f.lower().endswith(('.xlsx', '.xls', '.csv'))]
         
         if not target_files: return None
 
@@ -79,6 +77,7 @@ if p_data is not None:
     if st.button("Esegui Calcolo"):
         if curve_file:
             try:
+                # Caricamento curva: Giorno;00:00-00:15...
                 df_c = pd.read_csv(curve_file, sep=';', decimal=',', quotechar='"')
                 g_col = [c for c in df_c.columns if 'giorno' in c.lower()][0]
                 df_c[g_col] = pd.to_datetime(df_c[g_col], dayfirst=True)
@@ -86,7 +85,7 @@ if p_data is not None:
                 st.error(f"Errore caricamento curva: {e}")
                 st.stop()
             
-            # Normalizzazione date prezzi
+            # Normalizzazione date prezzi (formato YYYYMMDD)
             p_data[d_col] = p_data[d_col].astype(str).str.split('.').str[0].str.strip()
 
             results = []
@@ -101,19 +100,19 @@ if p_data is not None:
                         if p_row.empty: continue
                         p_val = p_row[market].values[0]
                         
-                        # Consumo in kWh
+                        # Consumo in kWh dai 4 quarti d'ora
                         q_vals = row_c.iloc[(h-1)*4 + 1 : (h-1)*4 + 5].apply(
                             lambda x: float(str(x).replace(',', '.')) if isinstance(x, str) else float(x)
                         ).values
                         
-                        energia_h = sum(q_vals)
-                        # Calcolo: (kWh * Prezzo_MWh) / 1000
-                        costo_h = (energia_h * p_val) / 1000
+                        energia_h_kwh = sum(q_vals)
+                        # Costo: (kWh * Prezzo_MWh) / 1000
+                        costo_h = (energia_h_kwh * p_val) / 1000
                         
                         res = {
                             "Data": row_c[g_col].date(), 
                             "Ora": h, 
-                            "Energia_Tot_kWh": energia_h,
+                            "Energia_Tot_kWh": energia_h_kwh,
                             "Prezzo_MWh": p_val,
                             "Costo_Prezzo_Orario": costo_h
                         }
@@ -123,23 +122,23 @@ if p_data is not None:
             if results:
                 final = pd.DataFrame(results)
                 
-                # Creazione riepilogo prima di rimuovere informazioni temporali
+                # Calcolo riepilogo mensile prima della formattazione
                 final_for_sum = final.copy()
                 final_for_sum['Mese'] = pd.to_datetime(final_for_sum['Data']).dt.strftime('%Y-%m')
                 summary = final_for_sum.groupby('Mese').sum(numeric_only=True).drop(columns=['Ora', 'Prezzo_MWh'])
                 
-                # Formattazione per la visualizzazione a video
+                # Visualizzazione a video con formattazione europea
                 view_df = final.copy()
                 for col in ["Energia_Tot_kWh", "Prezzo_MWh", "Costo_Prezzo_Orario"]:
                     view_df[col] = view_df[col].apply(format_euro)
 
-                st.write("### Dettaglio Elaborato")
+                st.write("### Dettaglio Orario")
                 st.dataframe(view_df)
 
                 st.write("### Riepilogo Mensile")
                 st.table(summary.applymap(format_euro))
                 
-                # Generazione Excel
+                # Export Excel (mantiene i numeri per i calcoli ma i fogli sono separati)
                 buf = BytesIO()
                 with pd.ExcelWriter(buf, engine='openpyxl') as w:
                     final.to_excel(w, index=False, sheet_name='Dettaglio')
@@ -152,6 +151,6 @@ if p_data is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Nessuna corrispondenza trovata tra le date.")
+                st.error("Nessuna corrispondenza trovata tra le date della curva e i prezzi.")
 else:
-    st.error(f"File prezzi per l'anno {year} non trovati nel repository.")
+    st.error(f"File prezzi 'Anno {year}' non trovato nel repository.")
